@@ -1,3 +1,5 @@
+> **VPS storage fork:** self-hosted server storage, offline queue, and legacy history migration. See [deployment and migration guide](docs/VPS.md).
+
 # Keep the Rhythm
 
 Keep the Rhythm is an Obsidian plugin that helps you maintain a consistent writing habit by tracking your daily word count, setting writing goals and visualizing data through a heatmap and customizable code blocks.

@@ -314,6 +314,11 @@ export async function getExistingOrCreateNewEntry(
 	const newActivity = await createActivityObject(file, date);
 
 	try {
+		if (state.plugin.cloud?.active) {
+			// An opened note is not a writing event; the first actual delta creates
+			// its durable row. Do not write unjournaled rows in server mode.
+			return newActivity;
+		}
 		const id = await getDB().dailyActivity.add(newActivity);
 		return { ...newActivity, id: id };
 	} catch (err) {

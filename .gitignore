@@ -33,3 +33,10 @@ backup-*
 keep-the-rhythm-*
 data copy.json
 data.json
+
+# Server secrets and runtime data
+.env
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+__pycache__/

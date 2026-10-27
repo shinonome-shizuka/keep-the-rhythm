@@ -1,3 +1,7 @@
+import type { SyncConfig } from "./sync/model";
+import { SyncStore } from "./sync/store";
+import { transport } from "./sync/transport";
+import { refreshActivities } from "./core/activityTracker";
 import { ManualEntryModal } from "./ui/components/ManualEntry";
 import {
 	Plugin,
@@ -43,6 +47,21 @@ export default class KeepTheRhythm extends Plugin {
 		},
 	};
 
+	cloud!: SyncStore;
+	private work: Promise<void> = Promise.resolve();
+	private closing = false;
+	private syncStatusEl: HTMLElement | null = null;
+
+	private enqueue(action: () => Promise<void>) {
+		if (this.closing) return;
+		this.work = this.work.then(action).catch((error: unknown) => {
+			console.error("KTR: Could not save activity", error);
+			new Notice(
+				"Could not save activity. Check available device storage.",
+			);
+		});
+	}
+
 	private JSON_DEBOUNCE_TIME = 1000;
 	private LAST_BREAKING_CHANGE_TO_SCHEMA = "0.2";
 
@@ -51,6 +70,12 @@ export default class KeepTheRhythm extends Plugin {
 	async onload() {
 		state.setPlugin(this);
 		await initDatabase();
+		this.cloud = new SyncStore(transport, () => {
+			refreshActivities();
+			state.emit(EVENTS.REFRESH_EVERYTHING);
+		});
+		await this.cloud.load();
+		this.syncStatusEl = this.addStatusBarItem();
 
 		this.registerInterval(
 			window.setInterval(() => {
@@ -62,13 +87,17 @@ export default class KeepTheRhythm extends Plugin {
 		);
 
 		// todo: check if this is really necessary
-		void getDB().dailyActivity.clear(); // restarts DB to ensure data.json is the source of truth
+		if (!this.cloud.active) await getDB().dailyActivity.clear();
 
 		/////////
-		const loadedData =
-			(await this.loadData()) as unknown as PluginData | null;
+		const loadedData = (
+			this.cloud.active
+				? ((await this.cloud.meta<PluginData>("pluginData")) ??
+					(await this.loadData()))
+				: await this.loadData()
+		) as PluginData | null;
 
-		if (loadedData) {
+		if (loadedData && !this.cloud.active) {
 			// add setting to remove backups
 			try {
 				await this.backupDataToVaultFolder(loadedData);
@@ -82,7 +111,13 @@ export default class KeepTheRhythm extends Plugin {
 			loadedData &&
 			loadedData.schema == this.LAST_BREAKING_CHANGE_TO_SCHEMA
 		) {
-			await this.initializeDataFromJSON(loadedData);
+			if (this.cloud.active) {
+				this.data.settings = {
+					...DEFAULT_SETTINGS,
+					...loadedData.settings,
+				};
+				this.data.stats = { ...STARTING_STATS };
+			} else await this.initializeDataFromJSON(loadedData);
 		} else if (
 			loadedData &&
 			loadedData.schema !== this.LAST_BREAKING_CHANGE_TO_SCHEMA
@@ -99,7 +134,38 @@ export default class KeepTheRhythm extends Plugin {
 			this.data.settings = loadedData.settings;
 		}
 
-		await this.saveData(this.data);
+		if (this.cloud.config) {
+			try {
+				const rows = await getDB().dailyActivity.toArray();
+				if (!this.cloud.active) {
+					const folder = ".keep-the-rhythm";
+					if (!(await this.app.vault.adapter.exists(folder)))
+						await this.app.vault.adapter.mkdir(folder);
+					await this.app.vault.adapter.write(
+						`${folder}/pre-vps-${Date.now()}.json`,
+						JSON.stringify(
+							{
+								...this.data,
+								stats: {
+									...this.data.stats,
+									dailyActivity: rows,
+								},
+							},
+							null,
+							2,
+						),
+					);
+				}
+				await this.cloud.initialize(rows);
+			} catch (error) {
+				new Notice(
+					"Could not join server history. Local records are unchanged. Check server settings and reload.",
+				);
+				console.error("KTR server initialization failed", error);
+			}
+		}
+
+		await this.persistData();
 
 		// #endregion
 
@@ -135,7 +201,7 @@ export default class KeepTheRhythm extends Plugin {
 			codeBlocks.createEntriesCodeBlock,
 		);
 
-		state.on(EVENTS.REFRESH_EVERYTHING, () => {
+		const onRefresh = () => {
 			if (this.JsonDebounceTimeout) {
 				window.clearTimeout(this.JsonDebounceTimeout);
 			}
@@ -143,7 +209,22 @@ export default class KeepTheRhythm extends Plugin {
 			this.JsonDebounceTimeout = window.setTimeout(() => {
 				void this.saveDataToJSON();
 			}, this.JSON_DEBOUNCE_TIME);
-		});
+		};
+		state.on(EVENTS.REFRESH_EVERYTHING, onRefresh);
+		this.register(() => state.off(EVENTS.REFRESH_EVERYTHING, onRefresh));
+		this.registerInterval(
+			window.setInterval(() => {
+				void this.cloud.sync().catch(() => undefined);
+			}, 30_000),
+		);
+		this.registerInterval(
+			window.setInterval(() => {
+				this.syncStatusEl?.setText(
+					this.cloud.active ? `KTR: ${this.cloud.status}` : "",
+				);
+			}, 1000),
+		);
+		void this.cloud.sync().catch(() => undefined);
 	}
 
 	private async checkVaultCountStaleness() {
@@ -164,12 +245,13 @@ export default class KeepTheRhythm extends Plugin {
 				if (daysSinceLastActivity > 7) {
 					this.data.stats.wholeVaultWordCount = undefined;
 					this.data.stats.wholeVaultCharCount = undefined;
-					await this.saveData(this.data);
+					await this.persistData();
 				}
 			}
 		}
 	}
 	private async backupDataToVaultFolder(data: PluginData) {
+		if (this.cloud?.active) return;
 		const backupConfig =
 			data.settings.backupConfig || this.data.settings.backupConfig;
 
@@ -371,12 +453,18 @@ export default class KeepTheRhythm extends Plugin {
 	private initializeEvents() {
 		this.registerEvent(
 			this.app.workspace.on("editor-change", (editor, info) => {
-				void events.handleEditorChange(editor, info, this);
+				const file = info.file;
+				if (!file) return;
+				const snapshot = { file, content: editor.getValue() };
+				this.enqueue(() =>
+					events.handleEditorChange(editor, info, this, snapshot),
+				);
 			}),
 		);
 		this.registerEvent(
 			this.app.vault.on("delete", (file: TAbstractFile) => {
-				if (file instanceof TFile) void events.handleFileDelete(file);
+				if (file instanceof TFile)
+					this.enqueue(() => events.handleFileDelete(file));
 			}),
 		);
 		// this.registerEvent(
@@ -389,13 +477,15 @@ export default class KeepTheRhythm extends Plugin {
 				"rename",
 				(file: TAbstractFile, oldPath: string) => {
 					if (file instanceof TFile)
-						void events.handleFileRename(file, oldPath);
+						this.enqueue(() =>
+							events.handleFileRename(file, oldPath),
+						);
 				},
 			),
 		);
 		this.registerEvent(
 			this.app.workspace.on("file-open", (file) => {
-				if (file) void events.handleFileOpen(file);
+				if (file) this.enqueue(() => events.handleFileOpen(file));
 			}),
 		);
 	}
@@ -409,7 +499,10 @@ export default class KeepTheRhythm extends Plugin {
 	}
 
 	private async cleanupOnUnload(): Promise<void> {
+		this.closing = true;
+		await this.work;
 		await events.flushNow();
+		await this.cloud.stop();
 
 		if (this.JsonDebounceTimeout)
 			window.clearTimeout(this.JsonDebounceTimeout);
@@ -424,6 +517,7 @@ export default class KeepTheRhythm extends Plugin {
 	// #endregion
 
 	async onExternalSettingsChange() {
+		if (this.cloud.active) return;
 		try {
 			const newData = (await this.loadData()) as PluginData;
 
@@ -468,15 +562,112 @@ export default class KeepTheRhythm extends Plugin {
 
 	// #region SAVING DATA
 
+	async connectServer(config: SyncConfig): Promise<void> {
+		const operation = this.work.then(async () => {
+			await events.flushNow();
+			await this.cloud.stop();
+			const next = new SyncStore(transport, () => {
+				refreshActivities();
+				state.emit(EVENTS.REFRESH_EVERYTHING);
+			});
+			await next.setMeta("config", config);
+			await next.load();
+			this.cloud = next;
+			try {
+				const rows = await getDB().dailyActivity.toArray();
+				if (!config.active)
+					await this.writeHistoryBackup(rows, "pre-vps");
+				await next.initialize(rows);
+				await this.persistData();
+				await next.sync();
+				refreshActivities();
+				state.emit(EVENTS.REFRESH_EVERYTHING);
+			} catch (error) {
+				if (!next.active)
+					next.status = `Connection failed: ${error instanceof Error ? error.message : "request failed"}. Local records unchanged.`;
+				throw error;
+			}
+		});
+		this.work = operation.catch(() => undefined);
+		await operation;
+	}
+
+	private async writeHistoryBackup(
+		rows: import("./db/types").DailyActivity[],
+		prefix: string,
+	): Promise<string> {
+		const folder = ".keep-the-rhythm";
+		if (!(await this.app.vault.adapter.exists(folder)))
+			await this.app.vault.adapter.mkdir(folder);
+		const path = `${folder}/${prefix}-${Date.now()}.json`;
+		await this.app.vault.adapter.write(
+			path,
+			JSON.stringify(
+				{
+					...this.data,
+					stats: { ...this.data.stats, dailyActivity: rows },
+				},
+				null,
+				2,
+			),
+		);
+		return path;
+	}
+
+	async exportHistory(): Promise<string> {
+		await this.work;
+		await events.flushNow();
+		const folder = ".keep-the-rhythm";
+		if (!(await this.app.vault.adapter.exists(folder)))
+			await this.app.vault.adapter.mkdir(folder);
+		const path = `${folder}/export-${Date.now()}.json`;
+		const rows = await getDB().dailyActivity.toArray();
+		await this.app.vault.adapter.write(
+			path,
+			JSON.stringify(
+				{
+					...this.data,
+					stats: { ...this.data.stats, dailyActivity: rows },
+				},
+				null,
+				2,
+			),
+		);
+		return path;
+	}
+
+	private async persistData() {
+		if (this.cloud?.active) {
+			await this.cloud.setMeta("pluginData", {
+				...this.data,
+				stats: undefined,
+			});
+		} else await this.saveData(this.data);
+	}
+
 	private async saveDataToJSON() {
 		const dailyActivityDB = await getDB().dailyActivity.toArray();
+		if (this.cloud.active && this.data.stats) {
+			const totals = new Map<string, number>();
+			for (const row of dailyActivityDB)
+				totals.set(
+					row.date,
+					(totals.get(row.date) ?? 0) +
+						row.changes.reduce((sum, entry) => sum + entry.w, 0),
+				);
+			this.data.stats.daysWithCompletedGoal = [...totals]
+				.filter(
+					([, words]) => words >= this.data.settings.dailyWritingGoal,
+				)
+				.map(([date]) => date);
+		}
 
 		this.data.stats = {
 			...this.data.stats,
 			dailyActivity: dailyActivityDB,
 		};
 
-		await this.saveData(this.data);
+		await this.persistData();
 	}
 
 	public async updateCurrentStreak(increase: boolean) {
@@ -505,13 +696,13 @@ export default class KeepTheRhythm extends Plugin {
 	}
 
 	public async updateAndSaveEverything() {
-		await this.saveData(this.data);
+		await this.persistData();
 		invalidateAll();
 		state.setToday(); // already refreshes everything
 	}
 
 	public async quietSave() {
-		await this.saveData(this.data);
+		await this.persistData();
 	}
 
 	// #endregion

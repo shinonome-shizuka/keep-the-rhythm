@@ -1,3 +1,4 @@
+import { serverSettings } from "../../sync/settings";
 import { formatDate } from "@/utils/dateUtils";
 import {
 	App,
@@ -31,6 +32,7 @@ export class SettingsTab extends PluginSettingTab {
 
 	getSettingDefinitions(): SettingDefinitionItem[] {
 		return [
+			serverSettings(this.plugin),
 			...SETTINGS_SCHEMA.sections.map((section) =>
 				this.toGroupDefinition(section),
 			),

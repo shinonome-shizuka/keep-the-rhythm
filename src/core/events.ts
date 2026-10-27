@@ -30,13 +30,14 @@ export async function handleEditorChange(
 	editor: Editor,
 	info: MarkdownView | MarkdownFileInfo,
 	plugin: KeepTheRhythm,
+	snapshot?: { file: TFile; content: string },
 ) {
-	const file = info.file;
+	const file = snapshot?.file ?? info.file;
 	if (!file || file.extension !== "md") return;
 
 	checkDayChange();
 
-	const content = editor.getValue();
+	const content = snapshot?.content ?? editor.getValue();
 	const counts = {
 		words: getLanguageBasedWordCount(
 			content,
@@ -54,6 +55,25 @@ export async function handleEditorChange(
 		counts.words,
 		counts.chars,
 	);
+
+	if (plugin.cloud.active) {
+		if (wordsAdded !== 0 || charsAdded !== 0) {
+			await plugin.cloud.record({
+				date: state.today,
+				filePath: file.path,
+				wordCountStart: activity.wordCountStart,
+				charCountStart: activity.charCountStart,
+				timeKey: getCurrentTimeKey(),
+				w: wordsAdded,
+				c: charsAdded,
+			});
+			if (plugin.data.stats) {
+				plugin.data.stats.wholeVaultWordCount = undefined;
+				plugin.data.stats.wholeVaultCharCount = undefined;
+			}
+		}
+		return;
+	}
 
 	// const wordsAdded = newWordCount - totalWords;
 	// const charsAdded = newCharCount - totalChars;
@@ -198,6 +218,13 @@ export async function handleFileDelete(file: TFile) {
 	try {
 		await flushNow();
 
+		if (state.plugin.cloud.active) {
+			// History is retained when a note is deleted. Removing a history row
+			// explicitly uses observed event IDs and is safe on multiple devices.
+			forgetFile(file.path);
+			state.setCurrentActivity(null);
+			return;
+		}
 		const counts = getTrackedCounts(file.path); // before forgetting
 		const existing = await getActivtityForFile(state.today, file.path);
 		const timeKey = getCurrentTimeKey();
@@ -245,6 +272,11 @@ export async function handleFileDelete(file: TFile) {
  */
 export async function handleFileRename(file: TFile, oldPath: string) {
 	try {
+		if (state.plugin.cloud.active) {
+			await state.plugin.cloud.rename(oldPath, file.path);
+			renameTrackedPath(oldPath, file.path);
+			return;
+		}
 		await flushNow();
 		await getDB()
 			.dailyActivity.where("filePath")

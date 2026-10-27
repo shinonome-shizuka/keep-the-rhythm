@@ -136,3 +136,10 @@ export function getTrackedCounts(
 ): Counts | undefined {
 	return lastCounts.get(keyFor(filePath, date));
 }
+
+// Server updates change displayed rows, not the last text count observed locally.
+// Clearing lastCounts here would lose the next keystroke after every download.
+export function refreshActivities() {
+	activities.clear();
+	inFlight.clear();
+}

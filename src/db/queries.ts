@@ -348,7 +348,9 @@ export const deleteActivityById = async (entryId: number | undefined) => {
 	if (!entryId) return;
 
 	const entry = await getDB().dailyActivity.get(entryId);
-	await getDB().dailyActivity.delete(entryId);
+	if (state.plugin.cloud.active && entry)
+		await state.plugin.cloud.remove(entry.filePath, entry.date);
+	else await getDB().dailyActivity.delete(entryId);
 
 	if (entry) forgetFile(entry.filePath, entry.date);
 };
@@ -367,7 +369,9 @@ export const deleteActivityFromDate = async (
 		.first();
 
 	if (entry?.id) {
-		await getDB().dailyActivity.delete(entry.id);
+		if (state.plugin.cloud.active)
+			await state.plugin.cloud.remove(filePath, date);
+		else await getDB().dailyActivity.delete(entry.id);
 		forgetFile(filePath, date);
 		state.emit(EVENTS.REFRESH_EVERYTHING);
 	} else {
@@ -383,6 +387,18 @@ export async function addDeltaToActivity(
 	charsDelta: number,
 ) {
 	const currentTimeKey = getCurrentTimeKey();
+	if (state.plugin.cloud.active) {
+		await state.plugin.cloud.record({
+			date: dailyActivity.date,
+			filePath: dailyActivity.filePath,
+			wordCountStart: dailyActivity.wordCountStart,
+			charCountStart: dailyActivity.charCountStart,
+			timeKey: currentTimeKey,
+			w: wordsDelta,
+			c: charsDelta,
+		});
+		return;
+	}
 
 	await getDB()
 		.dailyActivity.where("[date+filePath]")
