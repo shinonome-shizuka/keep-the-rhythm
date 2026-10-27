@@ -1,3 +1,9 @@
+import {
+	VpsSettingsFile,
+	portableSettings,
+	configForDevice,
+} from "./sync/configFile";
+import type { ConnectionFields } from "./sync/configFile";
 import type { SyncConfig } from "./sync/model";
 import { SyncStore } from "./sync/store";
 import { transport } from "./sync/transport";
@@ -48,6 +54,7 @@ export default class KeepTheRhythm extends Plugin {
 	};
 
 	cloud!: SyncStore;
+	vpsSettingsFile!: VpsSettingsFile;
 	private work: Promise<void> = Promise.resolve();
 	private closing = false;
 	private syncStatusEl: HTMLElement | null = null;
@@ -75,6 +82,28 @@ export default class KeepTheRhythm extends Plugin {
 			state.emit(EVENTS.REFRESH_EVERYTHING);
 		});
 		await this.cloud.load();
+		this.vpsSettingsFile = new VpsSettingsFile(
+			this.app.vault.adapter,
+			`${this.manifest.dir ?? `${this.app.vault.configDir}/plugins/${this.manifest.id}`}/vps-settings.json`,
+		);
+		try {
+			const shared = await this.vpsSettingsFile.read();
+			if (shared) {
+				if (shared.connection) {
+					const config = configForDevice(
+						shared.connection,
+						this.cloud.config,
+					);
+					await this.cloud.setMeta("config", config);
+				}
+				if (shared.draft) await this.cloud.saveDraft(shared.draft);
+				await this.cloud.load();
+			} else await this.saveVpsSettingsFile();
+		} catch {
+			new Notice(
+				"无法读取 VPS 配置文件，已保留当前设备的连接。请检查 vps-settings.json。",
+			);
+		}
 		this.syncStatusEl = this.addStatusBarItem();
 
 		this.registerInterval(
@@ -503,6 +532,7 @@ export default class KeepTheRhythm extends Plugin {
 		await this.work;
 		await events.flushNow();
 		await this.cloud.stop();
+		await this.vpsSettingsFile.flush();
 
 		if (this.JsonDebounceTimeout)
 			window.clearTimeout(this.JsonDebounceTimeout);
@@ -562,6 +592,17 @@ export default class KeepTheRhythm extends Plugin {
 
 	// #region SAVING DATA
 
+	async saveVpsSettingsFile(): Promise<void> {
+		await this.vpsSettingsFile.write(
+			portableSettings(this.cloud.config, this.cloud.draft),
+		);
+	}
+
+	async saveVpsDraft(fields: ConnectionFields): Promise<void> {
+		await this.cloud.saveDraft(fields);
+		await this.saveVpsSettingsFile();
+	}
+
 	async connectServer(config: SyncConfig): Promise<void> {
 		const operation = this.work.then(async () => {
 			await events.flushNow();
@@ -574,6 +615,7 @@ export default class KeepTheRhythm extends Plugin {
 			await next.load();
 			this.cloud = next;
 			try {
+				await this.saveVpsSettingsFile();
 				const rows = await getDB().dailyActivity.toArray();
 				if (!config.active)
 					await this.writeHistoryBackup(rows, "pre-vps");

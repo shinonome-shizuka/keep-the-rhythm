@@ -17,8 +17,10 @@ export function serverSettings(plugin: KeepTheRhythm): SettingDefinitionGroup {
 	};
 	const saveDraft = async () => {
 		try {
-			await plugin.cloud.saveDraft({ url, token, vaultId });
-			report("输入已保存在本机。点击下方按钮连接，不需要重载插件。");
+			await plugin.saveVpsDraft({ url, token, vaultId });
+			report(
+				"输入已保存到插件目录的 vps-settings.json，可用 Syncthing 同步。",
+			);
 		} catch {
 			report("保存失败：无法写入本机缓存。请检查磁盘空间。");
 		}
@@ -27,7 +29,7 @@ export function serverSettings(plugin: KeepTheRhythm): SettingDefinitionGroup {
 		if (connecting) return;
 		connecting = true;
 		try {
-			await plugin.cloud.saveDraft({ url, token, vaultId });
+			await plugin.saveVpsDraft({ url, token, vaultId });
 			const serverUrl = normalizeServerUrl(url);
 			if (token.length < 32)
 				throw new Error(
@@ -93,7 +95,7 @@ export function serverSettings(plugin: KeepTheRhythm): SettingDefinitionGroup {
 			},
 			{
 				name: "Server URL",
-				desc: "自动保存在本机。VPS 请使用 HTTPS 地址。",
+				desc: "自动写入 vps-settings.json。VPS 请使用 HTTPS 地址。",
 				render: (setting) => {
 					setting.addText((input) =>
 						input
@@ -108,7 +110,7 @@ export function serverSettings(plugin: KeepTheRhythm): SettingDefinitionGroup {
 			},
 			{
 				name: "Access token",
-				desc: "填写服务器的 KTR_TOKEN，只保存在本机，不进入笔记同步。",
+				desc: "填写服务器的 KTR_TOKEN，会以明文写入 vps-settings.json，随配置一起同步。",
 				render: (setting) => {
 					setting.addText((input) => {
 						input.inputEl.type = "password";

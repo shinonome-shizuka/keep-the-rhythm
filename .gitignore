@@ -40,3 +40,6 @@ data.json
 *.sqlite3-wal
 *.sqlite3-shm
 __pycache__/
+
+# Syncthing connection settings contain the user token
+vps-settings.json
